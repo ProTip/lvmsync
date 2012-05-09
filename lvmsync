@@ -101,8 +101,10 @@ def process_dumpdata(instream, destdev, snapback = nil)
 				snapback.write(header)
 				snapback.write dest.read(chunksize)
 				dest.seek offset * chunksize
+				instream.read(chunksize)
+			else
+				dest.write instream.read(chunksize)
 			end
-			dest.write instream.read(chunksize)
 		end
 	end
 end
