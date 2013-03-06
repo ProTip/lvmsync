@@ -17,7 +17,7 @@ def main()
 	OptionParser.new do |opts|
 		opts.banner = "Usage: lvmsync [options]"
 		opts.separator ""
-		opts.separator "    lvmsync [--snapback <file>] <snapshot device> [<remotehost>:]<remotedevice>"
+		opts.separator "    lvmsync [--snapback <file>] [--identity <file>] <snapshot device> [<remotehost>:]<remotedevice>"
 		opts.separator "    lvmsync --server <destdevice>"
 		opts.separator "    lvmsync --apply <snapback file> <destdevice>"
 		opts.separator ""
@@ -28,12 +28,13 @@ def main()
 		opts.on("-v", "--[no-]verbose", "Run verbosely") { |v| options[:verbose] = true }
 		opts.on("-b <file>", "--snapback <file>", "Make a backup snapshot file on the destination") do |v|
 			options[:snapback] = v
-		end
+    end
+    opts.on("--identity <file>") { |v| options[:identity] = v }
 		opts.on("-a", "--apply", "Apply mode: write the contents of a snapback file to a device") do |v|
 			options[:apply] = true
 		end
-	end.parse!
-	
+  end.parse!
+
 	if options[:apply]
 		if ARGV[0].nil?
 			$stderr.puts "No snapback file specified."
@@ -62,7 +63,8 @@ def main()
 		if (ARGV[1].nil?)
 			$stderr.puts "No destination specified."
 			exit 1
-		end
+    end
+
 		dev, host = ARGV[1].split(':', 2).reverse
 		options[:snapdev] = ARGV[0]
 		options[:desthost] = host
@@ -161,7 +163,8 @@ def run_client(opts)
 	snapback = opts[:snapback] ? "--snapback #{opts[:snapback]}" : ''
 
 	server_cmd = if remotehost
-		"ssh #{remotehost} lvmsync --server #{snapback} #{remotedev}"
+    if opts[:identity] != "" then opts[:identity] = " -i #{opts[:identity]}" end
+		"ssh#{opts[:identity]} #{remotehost} lvmsync --server #{snapback} #{remotedev}"
 	else
 		"lvmsync --server #{snapback} #{remotedev}"
 	end
