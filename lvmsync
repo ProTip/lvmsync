@@ -3,9 +3,8 @@
 # Transfer a set of changes made to the origin of a snapshot LV to a block
 # device on a remote system.
 #
-# Usage:
-#
-#    lvmsync <snapshot> <remote>:<destblock>
+# Usage: Start with lvmsync --help, or read the README for all the gory
+# details
 #
 
 require 'optparse'
@@ -18,7 +17,7 @@ def main()
 	OptionParser.new do |opts|
 		opts.banner = "Usage: lvmsync [options]"
 		opts.separator ""
-		opts.separator "    lvmsync [--snapback <file>] <snapshot device> <remotehost>:<remotedevice>"
+		opts.separator "    lvmsync [--snapback <file>] <snapshot device> [<remotehost>:]<remotedevice>"
 		opts.separator "    lvmsync --server <destdevice>"
 		opts.separator "    lvmsync --apply <snapback file> <destdevice>"
 		opts.separator ""
@@ -64,7 +63,7 @@ def main()
 			$stderr.puts "No destination specified."
 			exit 1
 		end
-		host, dev = ARGV[1].split(':', 2)
+		dev, host = ARGV[1].split(':', 2).reverse
 		options[:snapdev] = ARGV[0]
 		options[:desthost] = host
 		options[:destdev] = dev
@@ -160,8 +159,14 @@ def run_client(opts)
 	total_size = 0
 	chunksize = nil
 	snapback = opts[:snapback] ? "--snapback #{opts[:snapback]}" : ''
+
+	server_cmd = if remotehost
+		"ssh #{remotehost} lvmsync --server #{snapback} #{remotedev}"
+	else
+		"lvmsync --server #{snapback} #{remotedev}"
+	end
 		
-	IO.popen("ssh #{remotehost} lvmsync --server #{snapback} #{remotedev}", 'w') do |remoteserver|
+	IO.popen(server_cmd, 'w') do |remoteserver|
 		remoteserver.puts PROTOCOL_VERSION
 	
 		File.open("/dev/mapper/#{origindm}", 'r') do |origindev|
@@ -170,6 +175,7 @@ def run_client(opts)
 				
 				snapdev.seek chunksize
 				in_progress = true
+				t = Time.now
 				while in_progress
 					(chunksize / 16).times do
 						origin_offset, snap_offset = snapdev.read(16).unpack("QQ")
@@ -186,6 +192,9 @@ def run_client(opts)
 						remoteserver.print origindev.read(chunksize)
 					end
 					snapdev.seek chunksize * chunksize / 16, IO::SEEK_CUR if in_progress
+					printf "\r%iB/s", chunksize / (Time.now - t)
+					$stdout.flush
+					t = Time.now
 				end
 			end
 			origindev.seek(0, IO::SEEK_END)
@@ -217,8 +226,8 @@ end
 def read_dm_list
 	dmlist = {}
 	`dmsetup ls`.split("\n").each do |l|
-		next unless l =~ /^(\S+)\s+\((\d+), (\d+)\)$/
-		dmlist[$1] = [$2.to_i, $3.to_i]
+		next unless l =~ /^(\S+)\s+\((\d+)(, |:)(\d+)\)$/
+		dmlist[$1] = [$2.to_i, $4.to_i]
 	end
 	dmlist
 end
@@ -260,15 +269,15 @@ end
 # of dmsetup ls
 def canonicalise_dm(origname)
 	case origname
-		when %r{^/dev/mapper/(.+)$}:
+		when %r{^/dev/mapper/(.+)$} then
 			$1
-		when %r{^/dev/([^/]+)/(.+)$}:
+		when %r{^/dev/([^/]+)/(.+)$} then
 			vg = $1
 			lv = $2
 			vg.gsub('-', '--') +
 			'-' +
 			lv.gsub('-', '--')
-		when %r{^([^/]+)/(.*)$}:
+		when %r{^([^/]+)/(.*)$} then
 			vg = $1
 			lv = $2
 			vg.gsub('-', '--') +
