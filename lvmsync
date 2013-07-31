@@ -20,8 +20,9 @@ def main()
 		opts.separator "    lvmsync [--snapback <file>] [--identity <file>] <snapshot device> [<remotehost>:]<remotedevice>"
 		opts.separator "    lvmsync --server <destdevice>"
 		opts.separator "    lvmsync --apply <snapback file> <destdevice>"
+		opts.separator "    lvmsync --merge <snapshot device> [<remotehost>:]<remotedevice>"
 		opts.separator ""
-		
+
 		opts.on("--server", "Run in server mode (not intended for interactive use)") do |v|
 			options[:server] = true
 		end
@@ -30,6 +31,7 @@ def main()
 			options[:snapback] = v
     end
     opts.on("--identity <file>") { |v| options[:identity] = v }
+    opts.on("-m", "--merge", "Merge snapshot") { |v| options[:merge] = true }
 		opts.on("-a", "--apply", "Apply mode: write the contents of a snapback file to a device") do |v|
 			options[:apply] = true
 		end
@@ -59,7 +61,7 @@ def main()
 			$stderr.puts "ERROR: No snapshot specified.  Exiting."
 			exit 1
 		end
-	
+
 		if (ARGV[1].nil?)
 			$stderr.puts "No destination specified."
 			exit 1
@@ -75,13 +77,13 @@ end
 
 def run_server(opts)
 	destdev = opts[:destdev]
-	
+
 	handshake = $stdin.readline.chomp
 	unless handshake == PROTOCOL_VERSION
 		$stderr.puts "Handshake failed; protocol mismatch? (saw '#{handshake}' expected '#{PROTOCOL_VERSION}'"
 		exit 1
 	end
-	
+
 	if opts[:snapback]
 		File.open(opts[:snapback], 'w') do |snapback|
 			snapback.puts PROTOCOL_VERSION
@@ -114,7 +116,7 @@ def run_client(opts)
 	snapshot = opts[:snapdev]
 	remotehost = opts[:desthost]
 	remotedev = opts[:destdev]
-	
+
 	snapshotdm = canonicalise_dm(snapshot)
 
 	# First, read the dm table so we can see what we're dealing with
@@ -130,18 +132,18 @@ def run_client(opts)
 		$stderr.puts "#{snapshot} does not appear to be a snapshot"
 		exit 1
 	end
-	
+
 	origindm = dm_from_devnum(dmtable[snapshotdm][0][:args][0], dmlist)
-	
+
 	if origindm.nil?
 		$stderr.puts "CAN'T HAPPEN: No origin device for #{snapshot} found"
 		exit 1
 	end
 
 	puts "Found origin dm device: #{origindm}" if opts[:verbose]
-	
+
 	exceptiondm = dm_from_devnum(dmtable[snapshotdm][0][:args][1], dmlist)
-	
+
 	if exceptiondm.nil?
 		$stderr.puts "CAN'T HAPPEN: No exception list device for #{snapshot} found!"
 		exit 1
@@ -150,7 +152,7 @@ def run_client(opts)
 	# Since, in principle, we're not supposed to be reading from the CoW
 	# device directly, the kernel makes no attempt to make the device's read
 	# cache stay in sync with the actual state of the device.  As a result,
-	# we have to manually drop all caches before the data looks consistent. 
+	# we have to manually drop all caches before the data looks consistent.
 	# PERFORMANCE WIN!
 	File.open("/proc/sys/vm/drop_caches", 'w') { |fd| fd.print "3" }
 
@@ -163,48 +165,54 @@ def run_client(opts)
 	snapback = opts[:snapback] ? "--snapback #{opts[:snapback]}" : ''
 
 	server_cmd = if remotehost
-    if opts[:identity] != "" then opts[:identity] = " -i #{opts[:identity]}" end
+		opts[:identity] = opts[:identity].nil? ? "" : opts[:identity] = " -i #{opts[:identity]}"
 		"ssh#{opts[:identity]} #{remotehost} lvmsync --server #{snapback} #{remotedev}"
 	else
 		"lvmsync --server #{snapback} #{remotedev}"
 	end
-		
+
 	IO.popen(server_cmd, 'w') do |remoteserver|
 		remoteserver.puts PROTOCOL_VERSION
-	
-		File.open("/dev/mapper/#{origindm}", 'r') do |origindev|
-			File.open("/dev/mapper/#{exceptiondm}", 'r') do |snapdev|
-				chunksize = read_header(snapdev)
-				
-				snapdev.seek chunksize
-				in_progress = true
-				t = Time.now
-				while in_progress
-					(chunksize / 16).times do
-						origin_offset, snap_offset = snapdev.read(16).unpack("QQ")
-						origin_offset = ntohq(origin_offset)
-						snap_offset = ntohq(snap_offset)
-						if snap_offset == 0
-							in_progress = false
-							break
-						end
-						xfer_count += 1
-						puts "Sending chunk #{origin_offset}" if opts[:verbose]
-						origindev.seek origin_offset * chunksize
-						remoteserver.print [htonq(origin_offset), chunksize].pack("QN")
-						remoteserver.print origindev.read(chunksize)
-					end
-					snapdev.seek chunksize * chunksize / 16, IO::SEEK_CUR if in_progress
-					printf "\r%iB/s", chunksize / (Time.now - t)
-					$stdout.flush
+		File.open("/dev/mapper/#{snapshotdm}", 'r') do |snapshot|
+			File.open("/dev/mapper/#{origindm}", 'r') do |origindev|
+				File.open("/dev/mapper/#{exceptiondm}", 'r') do |snapdev|
+					chunksize = read_header(snapdev)
+
+					snapdev.seek chunksize
+					in_progress = true
 					t = Time.now
+					while in_progress
+						(chunksize / 16).times do
+							origin_offset, snap_offset = snapdev.read(16).unpack("QQ")
+							origin_offset = ntohq(origin_offset)
+							snap_offset = ntohq(snap_offset)
+							if snap_offset == 0
+								in_progress = false
+								break
+							end
+							xfer_count += 1
+							puts "Sending chunk #{origin_offset}" if opts[:verbose]
+							origindev.seek origin_offset * chunksize
+							snapshot.seek origin_offset * chunksize
+							remoteserver.print [htonq(origin_offset), chunksize].pack("QN")
+							if opts[:merge].nil?
+								remoteserver.print origindev.read(chunksize)
+							else
+								remoteserver.print snapshot.read(chunksize)
+							end
+						end
+						snapdev.seek chunksize * chunksize / 16, IO::SEEK_CUR if in_progress
+						printf "\r%iB/s", chunksize / (Time.now - t)
+						$stdout.flush
+						t = Time.now
+					end
 				end
+				origindev.seek(0, IO::SEEK_END)
+				total_size = origindev.tell / 4096
 			end
-			origindev.seek(0, IO::SEEK_END)
-			total_size = origindev.tell / 4096
 		end
 	end
-	
+
 	puts "Transferred #{xfer_count} of #{total_size} chunks (#{chunksize} bytes per chunk)"
 	puts "You saved #{(total_size - xfer_count) / total_size.to_f * 100}% of your transfer size!"
 end
@@ -212,14 +220,14 @@ end
 def run_apply(opts)
 	snapfile = opts[:snapfile]
 	device = opts[:device]
-	
+
 	File.open(snapfile, 'r') do |snapfd|
 		handshake = snapfd.readline.chomp
 		unless handshake == PROTOCOL_VERSION
 			$stderr.puts "Handshake failed; protocol mismatch? (saw '#{handshake}' expected '#{PROTOCOL_VERSION}'"
 			exit 1
 		end
-	
+
 		process_dumpdata(snapfd, device, nil)
 	end
 end
@@ -306,7 +314,7 @@ def read_header(snapdev)
 	raise RuntimeError.new("Invalid snapshot magic number") unless magic == 0x70416e53
 	raise RuntimeError.new("Snapshot marked as invalid") unless valid == 1
 	raise RuntimeError.new("Incompatible metadata version") unless metadata_version == 1
-	
+
 	# With all that out of the way, we can get down to business
 	chunksize * 512
 end
@@ -325,3 +333,4 @@ def ntohq val
 end
 
 main if __FILE__ == $0
+
